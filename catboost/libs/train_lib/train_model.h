@@ -10,6 +10,7 @@
 #include <catboost/libs/options/enums.h>
 #include <catboost/libs/options/load_options.h>
 #include <catboost/libs/options/output_file_options.h>
+#include <catboost/libs/data/load_data.h>
 
 #include <library/json/json_value.h>
 #include <library/object_factory/object_factory.h>
@@ -57,3 +58,10 @@ void TrainOneIteration(
     TLearnContext* ctx);
 
 using TTrainerFactory = NObjectFactory::TParametrizedObjectFactory<IModelTrainer, ETaskType>;
+
+void LoadPools(
+    const NCatboostOptions::TPoolLoadParams& loadOptions,
+    int threadCount,
+    NCB::TTargetConverter* const trainTargetConverter,
+    TProfileInfo* profile,
+    TTrainPools* pools);

@@ -72,7 +72,7 @@ static int GetThreadCount(const NCatboostOptions::TCatBoostOptions& options) {
 }
 
 
-static void LoadPools(
+void LoadPools(
     const NCatboostOptions::TPoolLoadParams& loadOptions,
     int threadCount,
     NCB::TTargetConverter* const trainTargetConverter,
