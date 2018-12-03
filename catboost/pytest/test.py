@@ -5645,11 +5645,11 @@ def test_broken_dsv_format(dataset_name, loss_function, has_pairs, has_group_wei
 
 
 @pytest.mark.parametrize('pool', ['higgs'])
-def test_convert_snapshot_to_model(pool):
+def test_snapshot_to_model_float_features(pool):
     output_model_path = yatest.common.test_output_path('model')
     output_eval_path = yatest.common.test_output_path('test.eval')
     snapshot_path = yatest.common.test_output_path('snapshot')
-    output_converted_model_path = yatest.common.test_output_path('model.converted')
+    output_model_path_converted = yatest.common.test_output_path('model.converted')
     cmd = (
         CATBOOST_PATH,
         'fit',
@@ -5668,8 +5668,9 @@ def test_convert_snapshot_to_model(pool):
     convert_cmd = (
         CATBOOST_PATH,
         'snapshot-to-model',
-        '-s', snapshot_path,
-        '-m', output_converted_model_path
+        '--snapshot-file', snapshot_path,
+        '-m', output_model_path_converted,
+        '--model-format', 'CatboostBinary'
     )
     yatest.common.execute(convert_cmd)
     formula_predict_path_origin = yatest.common.test_output_path('predict_test_origin.eval')
@@ -5688,9 +5689,188 @@ def test_convert_snapshot_to_model(pool):
         'calc',
         '--input-path', data_file(pool, 'test_small'),
         '--column-description', data_file(pool, 'train.cd'),
-        '-m', output_converted_model_path,
+        '-m', output_model_path_converted + '.bin',
         '--output-path', formula_predict_path_converted
     )
     yatest.common.execute(calc_cmd)
     assert (compare_evals_with_precision(output_eval_path, formula_predict_path_origin))
     assert (compare_evals_with_precision(output_eval_path, formula_predict_path_converted))
+
+
+@pytest.mark.parametrize('pool', ['higgs', 'adult'])
+def test_snapshot_to_model(pool):
+    output_model_path = yatest.common.test_output_path('model')
+    output_eval_path = yatest.common.test_output_path('test.eval')
+    snapshot_path = yatest.common.test_output_path('snapshot')
+    output_model_path_converted = yatest.common.test_output_path('model.converted')
+    cmd = (
+        CATBOOST_PATH,
+        'fit',
+        '--use-best-model', 'false',
+        '-f', data_file(pool, 'train_small'),
+        '-t', data_file(pool, 'test_small'),
+        '--column-description', data_file(pool, 'train.cd'),
+        '-i', '20',
+        '-T', '4',
+        '--eval-file', output_eval_path,
+        '-m', output_model_path,
+        '--model-format', 'CatboostBinary',
+        '--snapshot-file', snapshot_path
+    )
+    yatest.common.execute(cmd)
+    convert_cmd = (
+        CATBOOST_PATH,
+        'snapshot-to-model',
+        '--snapshot-file', snapshot_path,
+        '-m', output_model_path_converted,
+        '--model-format', 'CatboostBinary',
+        '-f', data_file(pool, 'train_small'),
+        '-t', data_file(pool, 'test_small'),
+        '--column-description', data_file(pool, 'train.cd')
+    )
+    yatest.common.execute(convert_cmd)
+    formula_predict_path_origin = yatest.common.test_output_path('predict_test_origin.eval')
+    formula_predict_path_converted = yatest.common.test_output_path('predict_test_converted.eval')
+    calc_cmd = (
+        CATBOOST_PATH,
+        'calc',
+        '--input-path', data_file(pool, 'test_small'),
+        '--column-description', data_file(pool, 'train.cd'),
+        '-m', output_model_path + '.bin',
+        '--output-path', formula_predict_path_origin
+    )
+    yatest.common.execute(calc_cmd)
+    calc_cmd = (
+        CATBOOST_PATH,
+        'calc',
+        '--input-path', data_file(pool, 'test_small'),
+        '--column-description', data_file(pool, 'train.cd'),
+        '-m', output_model_path_converted + '.bin',
+        '--output-path', formula_predict_path_converted
+    )
+    yatest.common.execute(calc_cmd)
+    assert (compare_evals_with_precision(output_eval_path, formula_predict_path_origin))
+    assert (compare_evals_with_precision(output_eval_path, formula_predict_path_converted))
+
+
+@pytest.mark.parametrize('pool', ['higgs', 'adult'])
+def test_snapshot_to_model_json(pool):
+    output_model_path = yatest.common.test_output_path('model')
+    output_eval_path = yatest.common.test_output_path('test.eval')
+    snapshot_path = yatest.common.test_output_path('snapshot')
+    output_model_path_converted = yatest.common.test_output_path('model.converted')
+    cmd = (
+        CATBOOST_PATH,
+        'fit',
+        '--use-best-model', 'false',
+        '-f', data_file(pool, 'train_small'),
+        '-t', data_file(pool, 'test_small'),
+        '--column-description', data_file(pool, 'train.cd'),
+        '-i', '20',
+        '-T', '4',
+        '--eval-file', output_eval_path,
+        '-m', output_model_path,
+        '--model-format', 'CatboostBinary',
+        '--snapshot-file', snapshot_path
+    )
+    yatest.common.execute(cmd)
+    convert_cmd = (
+        CATBOOST_PATH,
+        'snapshot-to-model',
+        '--snapshot-file', snapshot_path,
+        '-m', output_model_path_converted,
+        '--model-format', 'CatboostBinary,Json',
+        '-f', data_file(pool, 'train_small'),
+        '-t', data_file(pool, 'test_small'),
+        '--column-description', data_file(pool, 'train.cd')
+    )
+    yatest.common.execute(convert_cmd)
+    formula_predict_path_converted_bin = yatest.common.test_output_path('predict_test_converted.eval.bin')
+    formula_predict_path_converted_json = yatest.common.test_output_path('predict_test_converted.eval.json')
+    calc_cmd = (
+        CATBOOST_PATH,
+        'calc',
+        '--input-path', data_file(pool, 'test_small'),
+        '--column-description', data_file(pool, 'train.cd'),
+        '-m', output_model_path_converted + '.bin',
+        '--output-path', formula_predict_path_converted_bin
+    )
+    yatest.common.execute(calc_cmd)
+    calc_cmd = (
+        CATBOOST_PATH,
+        'calc',
+        '--input-path', data_file(pool, 'test_small'),
+        '--column-description', data_file(pool, 'train.cd'),
+        '-m', output_model_path_converted + '.json',
+        '--output-path', formula_predict_path_converted_json
+    )
+    yatest.common.execute(calc_cmd)
+    assert (compare_evals_with_precision(output_eval_path, formula_predict_path_converted_bin))
+    assert (compare_evals_with_precision(output_eval_path, formula_predict_path_converted_json))
+
+
+# @pytest.mark.parametrize('loss_function', MULTICLASS_LOSSES)
+# @pytest.mark.parametrize('boosting_type', BOOSTING_TYPE)
+# @pytest.mark.parametrize(
+#     'dev_score_calc_obj_block_size',
+#     SCORE_CALC_OBJ_BLOCK_SIZES,
+#     ids=SCORE_CALC_OBJ_BLOCK_SIZES_IDS
+# )
+# def test_snapshot_to_model_multiclass(loss_function, boosting_type, dev_score_calc_obj_block_size):
+#     pool = 'cloudness_small'
+#     output_model_path = yatest.common.test_output_path('model.bin')
+#     output_eval_path = yatest.common.test_output_path('test.eval')
+#     snapshot_path = yatest.common.test_output_path('snapshot')
+#     output_model_path_converted = yatest.common.test_output_path('model.converted')
+#     cmd = (
+#         CATBOOST_PATH,
+#         'fit',
+#         '--use-best-model', 'false',
+#         '--loss-function', loss_function,
+#         '-f', data_file(pool, 'train_small'),
+#         '-t', data_file(pool, 'test_small'),
+#         '--column-description', data_file(pool, 'train.cd'),
+#         '--boosting-type', boosting_type,
+#         '--dev-score-calc-obj-block-size', dev_score_calc_obj_block_size,
+#         '-i', '10',
+#         '-T', '4',
+#         '-m', output_model_path,
+#         '--eval-file', output_eval_path
+#     )
+#     yatest.common.execute(cmd)
+#     convert_cmd = (
+#         CATBOOST_PATH,
+#         'snapshot-to-model',
+#         '--snapshot-file', snapshot_path,
+#         '-m', output_model_path_converted,
+#         '--model-format', 'CatboostBinary',
+#         '-f', data_file(pool, 'train_small'),
+#         '-t', data_file(pool, 'test_small'),
+#         '--column-description', data_file(pool, 'train.cd')
+#     )
+#     yatest.common.execute(convert_cmd)
+#
+#     formula_predict_path = yatest.common.test_output_path('predict_test.eval')
+#     formula_predict_path_converted = yatest.common.test_output_path('predict_test_converted.eval.bin')
+#     calc_cmd = (
+#         CATBOOST_PATH,
+#         'calc',
+#         '--input-path', data_file(pool, 'test_small'),
+#         '--column-description', data_file(pool, 'train.cd'),
+#         '-m', output_model_path,
+#         '--output-path', formula_predict_path,
+#         '--prediction-type', 'RawFormulaVal'
+#     )
+#     yatest.common.execute(calc_cmd)
+#     calc_cmd = (
+#         CATBOOST_PATH,
+#         'calc',
+#         '--input-path', data_file(pool, 'test_small'),
+#         '--column-description', data_file(pool, 'train.cd'),
+#         '-m', output_model_path_converted,
+#         '--output-path', formula_predict_path_converted,
+#         '--prediction-type', 'RawFormulaVal'
+#     )
+#     yatest.common.execute(calc_cmd)
+#     assert(compare_evals(output_eval_path, formula_predict_path))
+#     assert(compare_evals(output_eval_path, formula_predict_path_converted))
