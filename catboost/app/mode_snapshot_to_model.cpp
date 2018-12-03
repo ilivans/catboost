@@ -13,7 +13,9 @@
 #include <catboost/libs/train_lib/train_model.h>
 #include <util/generic/scope.h>
 
-//#include <catboost/libs/options/metric_options.h>
+#include <catboost/libs/options/metric_options.h>
+#include <catboost/libs/train_lib/preprocess.h>
+#include <catboost/libs/algo/helpers.h>
 
 
 TLearnProgress LoadSnapshot(const TString& snapshotPath) {
@@ -100,13 +102,32 @@ void BuildModelWithCatFeatures(TLearnProgress* learnProgress,
     if (!ctx.Params.DataProcessingOptions->HasTimeFlag) {
         Shuffle(pools.Learn->Docs.QueryId, ctx.Rand, &indices);
     }
+
+    ELossFunction lossFunction = ctx.Params.LossFunctionDescription.Get().GetLossFunction();
+    if (IsPairLogit(lossFunction) && pools.Learn->Pairs.empty()) {
+        CB_ENSURE(
+                !pools.Learn->Docs.Target.empty(),
+                "Pool labels are not provided. Cannot generate pairs."
+        );
+        CATBOOST_WARNING_LOG << "No pairs provided for learn dataset. "
+                             << "Trying to generate pairs using dataset labels." << Endl;
+        pools.Learn->Pairs.clear();
+        GeneratePairLogitPairs(
+                pools.Learn->Docs.QueryId,
+                pools.Learn->Docs.Target,
+                NCatboostOptions::GetMaxPairCount(ctx.Params.LossFunctionDescription),
+                &ctx.Rand,
+                &(pools.Learn->Pairs));
+        CATBOOST_INFO_LOG << "Generated " << pools.Learn->Pairs.size() << " pairs for learn pool." << Endl;
+    }
+
     ApplyPermutation(InvertPermutation(indices), pools.Learn, &ctx.LocalExecutor);
     Y_DEFER {
             ApplyPermutation(indices, pools.Learn, &ctx.LocalExecutor);
     };
     TDataset learnData = BuildDataset(*pools.Learn);
 
-    ELossFunction lossFunction = ctx.Params.LossFunctionDescription.Get().GetLossFunction();
+//    ELossFunction lossFunction = ctx.Params.LossFunctionDescription.Get().GetLossFunction();
     TVector<TDataset> testDatasets;
     for (const TPool* testPoolPtr : pools.Test) {
         testDatasets.push_back(BuildDataset(*testPoolPtr));
@@ -124,18 +145,60 @@ void BuildModelWithCatFeatures(TLearnProgress* learnProgress,
     }
     const TDatasetPtrs& testDataPtrs = GetConstPointers(testDatasets);
 
-//    const bool isMulticlass = IsMultiClass(lossFunction, ctx.Params.MetricOptions);
-//
-//    if (isMulticlass) {
-//        int classesCount = GetClassesCount(
-//                ctx.Params.DataProcessingOptions->ClassesCount,
-//                ctx.Params.DataProcessingOptions->ClassNames
-//        );
-//        ctx.LearnProgress.LabelConverter.Initialize(learnData.Target, classesCount);
-//        ctx.LearnProgress.ApproxDimension = ctx.LearnProgress.LabelConverter.GetApproxDimension();
-//    }
+    const bool isMulticlass = IsMultiClass(lossFunction, ctx.Params.MetricOptions);
+
+    if (isMulticlass) {
+        int classesCount = GetClassesCount(
+                ctx.Params.DataProcessingOptions->ClassesCount,
+                ctx.Params.DataProcessingOptions->ClassNames
+        );
+        ctx.LearnProgress.LabelConverter.Initialize(learnData.Target, classesCount);
+        ctx.LearnProgress.ApproxDimension = ctx.LearnProgress.LabelConverter.GetApproxDimension();
+    }
+
+
+    TVector<ELossFunction> metrics;
+    if (ctx.Params.MetricOptions->EvalMetric.IsSet()) {
+        metrics.push_back(ctx.Params.MetricOptions->EvalMetric->GetLossFunction());
+    }
+    metrics.push_back(ctx.Params.LossFunctionDescription->GetLossFunction());
+    for (const auto& metric : ctx.Params.MetricOptions->CustomMetrics.Get()) {
+        metrics.push_back(metric.GetLossFunction());
+    }
+    bool hasGroupwiseMetric = false;
+    for (const auto& metric : metrics) {
+        if (IsGroupwiseMetric(metric)) {
+            hasGroupwiseMetric = true;
+        }
+    }
+    if (hasGroupwiseMetric) {
+        CB_ENSURE(HaveGoodQueryIds(learnData), "Group ids not provided for groupwise metric.");
+        CB_ENSURE(HaveGoodQueryIds(testDataPtrs), "Group ids not provided for groupwise metric.");
+    }
+
+    UpdateQueryInfo(&learnData);
+    for (TDataset& testData : testDatasets) {
+        UpdateQueryInfo(&testData);
+    }
+
+    const TVector<float>& classWeights = ctx.Params.DataProcessingOptions->ClassWeights;
+    const auto& labelConverter = ctx.LearnProgress.LabelConverter;
+    Preprocess(ctx.Params.LossFunctionDescription, classWeights, labelConverter, learnData);
+    CheckLearnConsistency(ctx.Params.LossFunctionDescription, ctx.Params.DataProcessingOptions->AllowConstLabel.Get(), learnData);
+    for (TDataset& testData : testDatasets) {
+        Preprocess(ctx.Params.LossFunctionDescription, classWeights, labelConverter, testData);
+        CheckTestConsistency(ctx.Params.LossFunctionDescription, learnData, testData);
+    }
+
+    ctx.OutputMeta();
+
 
     const auto& catFeatureParams = ctx.Params.CatFeatureParams.Get();
+    if (!pools.Learn->IsQuantized()) {
+        GenerateBorders(*pools.Learn, &ctx, &ctx.LearnProgress.FloatFeatures);
+    } else {
+        ctx.LearnProgress.FloatFeatures = pools.Learn->FloatFeatures;
+    }
     QuantizeTrainPools(
             pools,
             ctx.LearnProgress.FloatFeatures,
@@ -197,21 +260,24 @@ void BuildModelWithCatFeatures(TLearnProgress* learnProgress,
     TFullModel model;
     model.ObliviousTrees = std::move(obliviousTrees);
     model.ModelInfo["params"] = ctx.LearnProgress.SerializedTrainParams;
+
+    CB_ENSURE(isMulticlass == ctx.LearnProgress.LabelConverter.IsInitialized(),
+              "LabelConverter must be initialized ONLY for multiclass problem");
+    if (isMulticlass) {
+        model.ModelInfo["multiclass_params"] = ctx.LearnProgress.LabelConverter.SerializeMulticlassParams(
+                ctx.Params.DataProcessingOptions->ClassesCount,
+                ctx.Params.DataProcessingOptions->ClassNames
+        );;
+    }
+    for (const auto& keyValue: ctx.Params.Metadata.Get().GetMap()) {
+        model.ModelInfo[keyValue.first] = keyValue.second.GetString();
+    }
     if (ctx.OutputOptions.GetFinalCtrComputationMode() == EFinalCtrComputationMode::Default) {
         coreModelToFullModelConverter.WithCoreModelFrom(&model).Do(
                 &model,
                 ctx.OutputOptions.ExportRequiresStaticCtrProvider()
         );
     }
-//    CB_ENSURE(isMulticlass == ctx.LearnProgress.LabelConverter.IsInitialized(),
-//              "LabelConverter must be initialized ONLY for multiclass problem");
-//    if (isMulticlass) {
-//        model.ModelInfo["multiclass_params"] = ctx.LearnProgress.LabelConverter.SerializeMulticlassParams(
-//                ctx.Params.DataProcessingOptions->ClassesCount,
-//                ctx.Params.DataProcessingOptions->ClassNames
-//        );;
-//    }
-
     TString outputFile = ctx.OutputOptions.CreateResultModelFullPath();
     for (const auto& format : ctx.OutputOptions.GetModelFormats()) {
         ExportModel(model, outputFile, format, "", ctx.OutputOptions.AddFileFormatExtension(), &pools.Learn->FeatureId, &pools.Learn->CatFeaturesHashToString);
