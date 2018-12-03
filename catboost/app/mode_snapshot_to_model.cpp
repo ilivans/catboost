@@ -153,59 +153,101 @@ int mode_snapshot_to_model(int argc, const char* argv[]) {
         ctx.LearnProgress = std::move(learnProgress);
 
 
-//        TVector<ui64> indices(pools.Learn->Docs.GetDocCount());
-//        std::iota(indices.begin(), indices.end(), 0);
-//        ui64 minTimestamp = *MinElement(pools.Learn->Docs.Timestamp.begin(), pools.Learn->Docs.Timestamp.end());
-//        ui64 maxTimestamp = *MaxElement(pools.Learn->Docs.Timestamp.begin(), pools.Learn->Docs.Timestamp.end());
-//        if (minTimestamp != maxTimestamp) {
-//            indices = CreateOrderByKey(pools.Learn->Docs.Timestamp);
-//            ctx.Params.DataProcessingOptions->HasTimeFlag = true;
-//        }
-//        if (!ctx.Params.DataProcessingOptions->HasTimeFlag) {
-//            Shuffle(pools.Learn->Docs.QueryId, ctx.Rand, &indices);
-//        }
+        TVector<ui64> indices(pools.Learn->Docs.GetDocCount());
+        std::iota(indices.begin(), indices.end(), 0);
+        ui64 minTimestamp = *MinElement(pools.Learn->Docs.Timestamp.begin(), pools.Learn->Docs.Timestamp.end());
+        ui64 maxTimestamp = *MaxElement(pools.Learn->Docs.Timestamp.begin(), pools.Learn->Docs.Timestamp.end());
+        if (minTimestamp != maxTimestamp) {
+            indices = CreateOrderByKey(pools.Learn->Docs.Timestamp);
+            ctx.Params.DataProcessingOptions->HasTimeFlag = true;
+        }
+        if (!ctx.Params.DataProcessingOptions->HasTimeFlag) {
+            Shuffle(pools.Learn->Docs.QueryId, ctx.Rand, &indices);
+        }
 
 
-//        ELossFunction lossFunction = ctx.Params.LossFunctionDescription.Get().GetLossFunction();
-//        if (IsPairLogit(lossFunction) && pools.Learn->Pairs.empty()) {
-//            CB_ENSURE(
-//                    !pools.Learn->Docs.Target.empty(),
-//                    "Pool labels are not provided. Cannot generate pairs."
-//            );
-//            CATBOOST_WARNING_LOG << "No pairs provided for learn dataset. "
-//                                 << "Trying to generate pairs using dataset labels." << Endl;
-//            pools.Learn->Pairs.clear();
-//            GeneratePairLogitPairs(
-//                    pools.Learn->Docs.QueryId,
-//                    pools.Learn->Docs.Target,
-//                    NCatboostOptions::GetMaxPairCount(ctx.Params.LossFunctionDescription),
-//                    &ctx.Rand,
-//                    &(pools.Learn->Pairs));
-//            CATBOOST_INFO_LOG << "Generated " << pools.Learn->Pairs.size() << " pairs for learn pool." << Endl;
-//        }
-//
-//        if (!pools.Learn->IsQuantized()) {
-//            GenerateBorders(*pools.Learn, &ctx, &ctx.LearnProgress.FloatFeatures);
-//        } else {
-//            ctx.LearnProgress.FloatFeatures = pools.Learn->FloatFeatures;
-//        }
+        ELossFunction lossFunction = ctx.Params.LossFunctionDescription.Get().GetLossFunction();
+        if (IsPairLogit(lossFunction) && pools.Learn->Pairs.empty()) {
+            CB_ENSURE(
+                    !pools.Learn->Docs.Target.empty(),
+                    "Pool labels are not provided. Cannot generate pairs."
+            );
+            CATBOOST_WARNING_LOG << "No pairs provided for learn dataset. "
+                                 << "Trying to generate pairs using dataset labels." << Endl;
+            pools.Learn->Pairs.clear();
+            GeneratePairLogitPairs(
+                    pools.Learn->Docs.QueryId,
+                    pools.Learn->Docs.Target,
+                    NCatboostOptions::GetMaxPairCount(ctx.Params.LossFunctionDescription),
+                    &ctx.Rand,
+                    &(pools.Learn->Pairs));
+            CATBOOST_INFO_LOG << "Generated " << pools.Learn->Pairs.size() << " pairs for learn pool." << Endl;
+        }
+
+        ApplyPermutation(InvertPermutation(indices), pools.Learn, &ctx.LocalExecutor);
+        Y_DEFER {
+                ApplyPermutation(indices, pools.Learn, &ctx.LocalExecutor);
+        };
 
         TDataset learnData = BuildDataset(*pools.Learn);
 
-//        const TVector<float>& classWeights = ctx.Params.DataProcessingOptions->ClassWeights;
-//        const auto& labelConverter = ctx.LearnProgress.LabelConverter;
-//        Preprocess(ctx.Params.LossFunctionDescription, classWeights, labelConverter, learnData);
-//        CheckLearnConsistency(ctx.Params.LossFunctionDescription, ctx.Params.DataProcessingOptions->AllowConstLabel.Get(), learnData);
+        const TVector<float>& classWeights = ctx.Params.DataProcessingOptions->ClassWeights;
+        const auto& labelConverter = ctx.LearnProgress.LabelConverter;
+        Preprocess(ctx.Params.LossFunctionDescription, classWeights, labelConverter, learnData);
+        CheckLearnConsistency(ctx.Params.LossFunctionDescription, ctx.Params.DataProcessingOptions->AllowConstLabel.Get(), learnData);
 
-//        CATBOOST_DEBUG_LOG << "IsQuantized " << pools.Learn->IsQuantized() << Endl;
-//        if (!pools.Learn->IsQuantized()) {
-//            GenerateBorders(*pools.Learn, &ctx, &ctx.LearnProgress.FloatFeatures);
-//        } else {
-//            ctx.LearnProgress.FloatFeatures = pools.Learn->FloatFeatures;
-//        }
+        CATBOOST_DEBUG_LOG << "IsQuantized " << pools.Learn->IsQuantized() << Endl;
+        if (!pools.Learn->IsQuantized()) {
+            GenerateBorders(*pools.Learn, &ctx, &ctx.LearnProgress.FloatFeatures);
+        } else {
+            ctx.LearnProgress.FloatFeatures = pools.Learn->FloatFeatures;
+        }
+
+        for (const TPool* testPoolPtr : pools.Test) {
+            const TPool& testPool = *testPoolPtr;
+            if (testPool.Docs.GetDocCount() == 0) {
+                continue;
+            }
+            CB_ENSURE(
+                    testPool.GetFactorCount() == pools.Learn->GetFactorCount(),
+                    "train pool factors count == " << pools.Learn->GetFactorCount() << " and test pool factors count == " << testPool.GetFactorCount()
+            );
+
+            // TODO(akhropov): cast will be removed after switch to new Pool format. MLTOOLS-140.
+            auto catFeaturesTest = ToUnsigned(testPool.CatFeatures);
+            Sort(catFeaturesTest.begin(), catFeaturesTest.end());
+            CB_ENSURE(sortedCatFeatures == catFeaturesTest, "Cat features in train and test should be the same.");
+        }
+
+        TVector<TDataset> testDatasets;
+        for (const TPool* testPoolPtr : pools.Test) {
+            testDatasets.push_back(BuildDataset(*testPoolPtr));
+            auto& pairs = testDatasets.back().Pairs;
+            if (IsPairLogit(lossFunction) && pairs.empty()) {
+                GeneratePairLogitPairs(
+                        testDatasets.back().QueryId,
+                        testDatasets.back().Target,
+                        NCatboostOptions::GetMaxPairCount(ctx.Params.LossFunctionDescription),
+                        &ctx.Rand,
+                        &pairs);
+                CATBOOST_INFO_LOG << "Generated " << pairs.size()
+                                  << " pairs for test pool " <<  testDatasets.size() << "." << Endl;
+            }
+        }
+
+        const TDatasetPtrs& testDataPtrs = GetConstPointers(testDatasets);
+
+        for (TDataset& testData : testDatasets) {
+            UpdateQueryInfo(&testData);
+        }
+        for (TDataset& testData : testDatasets) {
+            Preprocess(ctx.Params.LossFunctionDescription, classWeights, labelConverter, testData);
+            CheckTestConsistency(ctx.Params.LossFunctionDescription, learnData, testData);
+        }
+
 
         const auto& catFeatureParams = ctx.Params.CatFeatureParams.Get();
-        TVector<TDataset> testDatasets;
+//        TVector<TDataset> testDatasets;
         QuantizeTrainPools(
                 pools,
                 ctx.LearnProgress.FloatFeatures,
@@ -216,7 +258,7 @@ int mode_snapshot_to_model(int argc, const char* argv[]) {
                 &learnData,
                 &testDatasets
         );
-        ctx.InitContext(learnData, TDatasetPtrs());
+        ctx.InitContext(learnData, testDataPtrs);
 
 //        ctx.LearnProgress.CatFeatures.resize(sortedCatFeatures.size());
 //        for (size_t i = 0; i < sortedCatFeatures.size(); ++i) {
@@ -270,7 +312,7 @@ int mode_snapshot_to_model(int argc, const char* argv[]) {
                 catFeatureParams
         );
 
-        const TDatasetPtrs& testDataPtrs = GetConstPointers(testDatasets);
+//        const TDatasetPtrs& testDataPtrs = GetConstPointers(testDatasets);
         TDatasetDataForFinalCtrs datasetDataForFinalCtrs;
         datasetDataForFinalCtrs.LearnData = &learnData;
         datasetDataForFinalCtrs.TestDataPtrs = &testDataPtrs;
